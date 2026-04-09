@@ -38,6 +38,11 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                 "enum": ["Likely Compliant", "Needs Review", "Likely Non-Compliant"],
             },
             "summary": {"type": "string"},
+            "confidence": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+            },
             "findings": {
                 "type": "array",
                 "items": {
@@ -69,7 +74,7 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                 },
             },
         },
-        "required": ["status", "summary", "findings", "agent_steps"],
+        "required": ["status", "summary", "confidence", "findings", "agent_steps"],
     },
 }
 
@@ -88,6 +93,13 @@ Important constraints:
   'Safety at Street Works and Road Works - pedestrian safety principles'
   'Safety at Street Works and Road Works - signing and taper principles'
 
+Use the inspection context provided by the user:
+- speed limit
+- road type
+- works type
+- nearby risks
+- reviewer note
+
 Always assess these checks where relevant and visible:
 1. Lead-in taper / transition into works area
 2. Advance warning signing
@@ -105,6 +117,7 @@ Decision rules:
 Return between 4 and 7 findings.
 Do not return an empty findings list unless the image is completely unreadable.
 Include agent_steps that briefly explain what you checked.
+Confidence should reflect how readable and decisive the drawing evidence is.
 Return only the structured output.
 """.strip()
 
@@ -120,6 +133,11 @@ async def check_drawing(
     standard: str = Form("uk_red_book"),
     agent_mode: str = Form("true"),
     client_name: str = Form("mobile_app", alias="client"),
+    speed_limit: str = Form("30"),
+    road_type: str = Form("urban-single-carriageway"),
+    works_type: str = Form("lane-closure"),
+    nearby_risks: str = Form(""),
+    reviewer_note: str = Form(""),
 ) -> dict[str, Any]:
     if standard != "uk_red_book":
         raise HTTPException(status_code=400, detail="Only uk_red_book is supported right now.")
@@ -148,6 +166,11 @@ async def check_drawing(
                 file_bytes=file_bytes,
                 agent_mode=agent_mode,
                 client_name=client_name,
+                speed_limit=speed_limit,
+                road_type=road_type,
+                works_type=works_type,
+                nearby_risks=nearby_risks,
+                reviewer_note=reviewer_note,
             ),
             text={"format": OUTPUT_SCHEMA},
         )
@@ -161,18 +184,36 @@ async def check_drawing(
     return parsed
 
 
-def _build_input(*, filename: str, file_bytes: bytes, agent_mode: str, client_name: str) -> list[dict[str, Any]]:
+def _build_input(
+    *,
+    filename: str,
+    file_bytes: bytes,
+    agent_mode: str,
+    client_name: str,
+    speed_limit: str,
+    road_type: str,
+    works_type: str,
+    nearby_risks: str,
+    reviewer_note: str,
+) -> list[dict[str, Any]]:
     extension = Path(filename).suffix.lower()
     mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     encoded = base64.b64encode(file_bytes).decode("utf-8")
 
-    user_text = (
-        "Review this temporary traffic management drawing and provide a practical Red Book style compliance result. "
-        f"Agent mode: {agent_mode}. Client: {client_name}. "
+    context_text = (
+        "Inspection context:\n"
+        f"- Agent mode: {agent_mode}\n"
+        f"- Client: {client_name}\n"
+        f"- Speed limit: {speed_limit} mph\n"
+        f"- Road type: {road_type}\n"
+        f"- Works type: {works_type}\n"
+        f"- Nearby risks: {nearby_risks or 'None provided'}\n"
+        f"- Reviewer note: {reviewer_note or 'None provided'}\n\n"
+        "Review this temporary traffic management drawing and provide a practical Red Book-style compliance result. "
         "Be decisive where the issue is visible, but use review where the drawing is unclear."
     )
 
-    content: list[dict[str, Any]] = [{"type": "input_text", "text": user_text}]
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": context_text}]
 
     if extension == ".pdf":
         content.append(
@@ -235,20 +276,53 @@ def _extract_structured_output(response: Any) -> dict[str, Any] | None:
 
 
 def _self_test() -> None:
-    png_input = _build_input(filename="test.png", file_bytes=b"fake", agent_mode="true", client_name="mobile_app")
+    png_input = _build_input(
+        filename="test.png",
+        file_bytes=b"fake",
+        agent_mode="true",
+        client_name="mobile_app",
+        speed_limit="30",
+        road_type="urban-single-carriageway",
+        works_type="lane-closure",
+        nearby_risks="zebra crossing",
+        reviewer_note="watch pedestrian route",
+    )
     assert png_input[0]["content"][1]["type"] == "input_image"
     assert png_input[0]["content"][1]["image_url"].startswith("data:image/png;base64,")
 
-    jpg_input = _build_input(filename="test.jpg", file_bytes=b"fake", agent_mode="true", client_name="mobile_app")
+    jpg_input = _build_input(
+        filename="test.jpg",
+        file_bytes=b"fake",
+        agent_mode="true",
+        client_name="mobile_app",
+        speed_limit="40",
+        road_type="rural-road",
+        works_type="stop-go",
+        nearby_risks="tight bend",
+        reviewer_note="high speed approach",
+    )
     assert jpg_input[0]["content"][1]["type"] == "input_image"
     assert jpg_input[0]["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
 
-    pdf_input = _build_input(filename="test.pdf", file_bytes=b"fake", agent_mode="true", client_name="mobile_app")
+    pdf_input = _build_input(
+        filename="test.pdf",
+        file_bytes=b"fake",
+        agent_mode="true",
+        client_name="mobile_app",
+        speed_limit="20",
+        road_type="residential-street",
+        works_type="footway-closure",
+        nearby_risks="school crossing",
+        reviewer_note="check vulnerable users",
+    )
     assert pdf_input[0]["content"][1]["type"] == "input_file"
     assert pdf_input[0]["content"][1]["file_data"].startswith("data:application/pdf;base64,")
 
 
 _self_test()
+
+# Run with:
+# uvicorn tm_drawing_check_backend:app --host 0.0.0.0 --port 10000
 
 # Run with:
 # uvicorn tm_drawing_check_backend:app --host 0.0.0.0 --port 10000
