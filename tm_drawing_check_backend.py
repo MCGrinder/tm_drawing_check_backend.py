@@ -74,24 +74,38 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 SYSTEM_PROMPT = """
-You are a UK temporary traffic management drawing reviewer.
+You are a careful UK temporary traffic management drawing reviewer.
 
-Review the uploaded TM drawing against UK Red Book style principles at a high level.
-Do not invent exact clause numbers unless they are clearly visible in the supplied material.
-Focus on practical compliance observations such as:
-- lane closures and tapers
-- advance warning signing
-- pedestrian route continuity and safety
-- crossings and junction visibility
-- cycle impact if visible
-- road user separation and obvious layout risks
+Your job is to review uploaded TM drawings against Safety at Street Works and Road Works (the Red Book) at a practical first-pass level.
+You must give useful compliance results, not vague generic output.
 
-Important rules:
-- If the drawing is too unclear to decide, use 'Needs Review'.
-- Do not call something non-compliant unless the issue is reasonably visible from the drawing.
-- Be cautious and explain uncertainty.
-- References should be short principle-style references.
-- Return only the structured output.
+Important constraints:
+- Do not invent exact clause numbers unless they are visible in the source material.
+- Use only what is reasonably visible from the drawing or photo.
+- If something is unclear, mark it as review, not fail.
+- Only use fail when a likely non-compliance is visible or a key requirement is clearly missing.
+- References must be short principle-style references such as:
+  'Safety at Street Works and Road Works - pedestrian safety principles'
+  'Safety at Street Works and Road Works - signing and taper principles'
+
+Always assess these checks where relevant and visible:
+1. Lead-in taper / transition into works area
+2. Advance warning signing
+3. Working space and separation from live traffic
+4. Pedestrian route continuity and obvious protection
+5. Crossing / junction visibility impacts
+6. Signal or shuttle-working clarity, if temporary signals or stop/go appear present
+7. General clarity of the layout drawing
+
+Decision rules:
+- Likely Non-Compliant: one or more important checks are fail
+- Needs Review: no important fail, but one or more relevant checks are review or drawing is too unclear
+- Likely Compliant: relevant checks are pass and no material concern is visible
+
+Return between 4 and 7 findings.
+Do not return an empty findings list unless the image is completely unreadable.
+Include agent_steps that briefly explain what you checked.
+Return only the structured output.
 """.strip()
 
 
@@ -104,7 +118,7 @@ def health() -> dict[str, str]:
 async def check_drawing(
     drawing: UploadFile = File(...),
     standard: str = Form("uk_red_book"),
-    agent_mode: str = Form("false"),
+    agent_mode: str = Form("true"),
     client_name: str = Form("mobile_app", alias="client"),
 ) -> dict[str, Any]:
     if standard != "uk_red_book":
@@ -152,12 +166,13 @@ def _build_input(*, filename: str, file_bytes: bytes, agent_mode: str, client_na
     mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     encoded = base64.b64encode(file_bytes).decode("utf-8")
 
-    request_text = (
-        "Review this temporary traffic management drawing and return a UK Red Book style first-pass compliance view. "
-        f"Agent mode: {agent_mode}. Client: {client_name}. Be cautious. Use 'Needs Review' where the drawing is unclear."
+    user_text = (
+        "Review this temporary traffic management drawing and provide a practical Red Book style compliance result. "
+        f"Agent mode: {agent_mode}. Client: {client_name}. "
+        "Be decisive where the issue is visible, but use review where the drawing is unclear."
     )
 
-    content: list[dict[str, Any]] = [{"type": "input_text", "text": request_text}]
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": user_text}]
 
     if extension == ".pdf":
         content.append(
