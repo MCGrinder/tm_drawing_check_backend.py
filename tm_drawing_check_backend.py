@@ -20,8 +20,12 @@ app.add_middleware(
 )
 
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-MODEL = os.environ.get("TM_AI_MODEL", "gpt-5")
+
+# Faster default for mobile use. Set TM_AI_MODEL in Render if you want to override.
+DEFAULT_QUICK_MODEL = os.environ.get("TM_AI_MODEL_QUICK", "gpt-5.4-mini")
+DEFAULT_FULL_MODEL = os.environ.get("TM_AI_MODEL_FULL", "gpt-5")
 MAX_FILE_SIZE_MB = int(os.environ.get("TM_MAX_FILE_SIZE_MB", "15"))
+
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 SUPPORTED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
@@ -108,6 +112,7 @@ Use the supplied inspection context:
 - works type
 - nearby risks
 - reviewer note
+- review mode
 
 Assess the drawing using these practical checks where relevant and visible:
 1. Is the overall TM layout understandable and coherent?
@@ -122,16 +127,9 @@ Assess the drawing using these practical checks where relevant and visible:
 Decision guidance:
 - Likely Non-Compliant:
   use this where one or more important visible safety issues are fail.
-  Examples:
-  - pedestrians appear left with no obvious route where one is clearly needed
-  - the layout appears to push traffic into conflict with no visible transition/protection
-  - an obvious crossing/junction conflict is visible and unmanaged
-  - the arrangement is clearly confusing or unsafe
-
 - Needs Review:
   use this where the drawing may be acceptable, but the evidence is unclear, partial, low quality, cropped, or ambiguous.
   Also use this where a reviewer would reasonably want more detail before approving.
-
 - Likely Compliant:
   use this where the visible layout appears sensible, coherent, and no material concern is obvious.
 
@@ -141,10 +139,20 @@ Finding balance:
 - Be practical.
 - Think like a reviewer looking at a real submitted TM plan, not a textbook diagram.
 
+Quick review mode:
+- Be concise.
+- Focus on the most important visible issues only.
+- Return 4 findings where possible.
+- Prefer speed.
+
+Full review mode:
+- Be more thorough.
+- Return 5 to 7 findings where possible.
+- Give a fuller summary and fuller agent steps.
+- Use the supplied context more deeply.
+
 Output requirements:
-- Return 4 to 7 findings unless the drawing is unreadable.
-- Include a mix of pass/review/fail as appropriate.
-- Findings must be specific and useful.
+- Do not return an empty findings list unless the drawing is unreadable.
 - Include agent_steps summarising what you checked.
 - Confidence should reflect image clarity and certainty of judgement.
 - Return only the structured output.
@@ -167,6 +175,7 @@ async def check_drawing(
     works_type: str = Form("lane-closure"),
     nearby_risks: str = Form(""),
     reviewer_note: str = Form(""),
+    review_mode: str = Form("quick"),
 ) -> dict[str, Any]:
     if standard != "uk_red_book":
         raise HTTPException(status_code=400, detail="Only uk_red_book is supported right now.")
@@ -179,6 +188,9 @@ async def check_drawing(
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, PNG, JPG, JPEG, or WEBP.")
 
+    if review_mode not in {"quick", "full"}:
+        raise HTTPException(status_code=400, detail="Invalid review_mode. Use quick or full.")
+
     file_bytes = await drawing.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file was empty.")
@@ -186,9 +198,11 @@ async def check_drawing(
     if len(file_bytes) > MAX_FILE_SIZE_MB * 1024 * 1024:
         raise HTTPException(status_code=400, detail=f"File too large. Max size is {MAX_FILE_SIZE_MB} MB.")
 
+    model = DEFAULT_QUICK_MODEL if review_mode == "quick" else DEFAULT_FULL_MODEL
+
     try:
         response = openai_client.responses.create(
-            model=MODEL,
+            model=model,
             instructions=SYSTEM_PROMPT,
             input=_build_input(
                 filename=filename,
@@ -200,6 +214,7 @@ async def check_drawing(
                 works_type=works_type,
                 nearby_risks=nearby_risks,
                 reviewer_note=reviewer_note,
+                review_mode=review_mode,
             ),
             text={"format": OUTPUT_SCHEMA},
         )
@@ -224,6 +239,7 @@ def _build_input(
     works_type: str,
     nearby_risks: str,
     reviewer_note: str,
+    review_mode: str,
 ) -> list[dict[str, Any]]:
     extension = Path(filename).suffix.lower()
     mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
@@ -233,6 +249,7 @@ def _build_input(
         "Inspection context:\n"
         f"- Agent mode: {agent_mode}\n"
         f"- Client: {client_name}\n"
+        f"- Review mode: {review_mode}\n"
         f"- Speed limit: {speed_limit} mph\n"
         f"- Road type: {road_type}\n"
         f"- Works type: {works_type}\n"
@@ -315,9 +332,11 @@ def _self_test() -> None:
         works_type="lane-closure",
         nearby_risks="zebra crossing",
         reviewer_note="watch pedestrian route",
+        review_mode="quick",
     )
     assert png_input[0]["content"][1]["type"] == "input_image"
     assert png_input[0]["content"][1]["image_url"].startswith("data:image/png;base64,")
+    assert "Review mode: quick" in png_input[0]["content"][0]["text"]
 
     jpg_input = _build_input(
         filename="test.jpg",
@@ -329,9 +348,11 @@ def _self_test() -> None:
         works_type="stop-go",
         nearby_risks="tight bend",
         reviewer_note="high speed approach",
+        review_mode="full",
     )
     assert jpg_input[0]["content"][1]["type"] == "input_image"
     assert jpg_input[0]["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
+    assert "Review mode: full" in jpg_input[0]["content"][0]["text"]
 
     pdf_input = _build_input(
         filename="test.pdf",
@@ -343,6 +364,7 @@ def _self_test() -> None:
         works_type="footway-closure",
         nearby_risks="school crossing",
         reviewer_note="check vulnerable users",
+        review_mode="quick",
     )
     assert pdf_input[0]["content"][1]["type"] == "input_file"
     assert pdf_input[0]["content"][1]["file_data"].startswith("data:application/pdf;base64,")
